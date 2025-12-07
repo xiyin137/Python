@@ -7,28 +7,27 @@ import textwrap
 import re
 import shutil
 import tempfile
+import copy
 from datetime import datetime
+from io import BytesIO
 
+# --- PYQT6 IMPORTS ---
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator,
                              QLabel, QLineEdit, QTextEdit, QPushButton, QSplitter, QComboBox, 
                              QMessageBox, QScrollArea, QListWidget, QListWidgetItem,
                              QInputDialog, QFileDialog, QTabWidget, QDialog, 
                              QRadioButton, QButtonGroup, QAbstractItemView, QSlider, QSpinBox,
-                             QSizePolicy, QToolBar, QMenu, QFrame, QColorDialog, QCheckBox)
+                             QSizePolicy, QToolBar, QMenu, QFrame, QColorDialog, QCheckBox, QStyle,
+                             QGridLayout)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QUrl, QRect
-from PyQt6.QtGui import QPixmap, QImage, QFont, QPainter, QPen, QAction, QDesktopServices, QCursor, QColor, QIcon
+from PyQt6.QtGui import (QPixmap, QImage, QFont, QPainter, QPen, QAction, 
+                         QDesktopServices, QCursor, QColor, QIcon, QPalette, QBrush)
 
 # --- MATPLOTLIB SETUP ---
 import matplotlib
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from io import BytesIO
-
-# --- PHYSICS FONT STYLING ---
-matplotlib.rcParams['mathtext.fontset'] = 'cm'
-matplotlib.rcParams['font.family'] = 'serif' 
-matplotlib.rcParams['font.serif'] = ['cmr10']
 
 # --- CONFIGURATION ---
 def get_script_dir():
@@ -54,16 +53,30 @@ TEMP_WOLFRAM_IMG_BASE = os.path.join(SCRIPT_DIR, "temp_wolfram_plot").replace("\
 if not os.path.exists(IMG_DIR):
     os.makedirs(IMG_DIR)
 
+# --- THEME UTILS ---
+def apply_dark_theme(app):
+    app.setStyle("Fusion")
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Base, QColor(25, 25, 25))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+    palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
+    app.setPalette(palette)
+
 # --- CUSTOM WIDGETS ---
 
 class ResizableDraggableContainer(QWidget):
-    """ 
-    Base class for widgets that can be moved and resized on a canvas.
-    """
     MARGIN = 10
     MIN_SIZE = 50
-
-    # Resize Modes
     NONE = 0
     MOVE = 1
     RESIZE_L = 2
@@ -81,13 +94,8 @@ class ResizableDraggableContainer(QWidget):
         self.mode = self.NONE
         self.drag_start_pos = None
         self.rect_start = None
-        
-        # Styles
         self.setAutoFillBackground(False)
-        # Dashed border to indicate it is an object, but transparent bg
-        self.setStyleSheet("QWidget { border: 1px dashed #999; background-color: transparent; }")
-        
-        # Context Menu to Delete
+        self.setStyleSheet("QWidget { border: 1px dashed #777; background-color: rgba(0,0,0,10); }")
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
@@ -102,17 +110,14 @@ class ResizableDraggableContainer(QWidget):
         x, y = pos.x(), pos.y()
         w, h = self.width(), self.height()
         m = self.MARGIN
-
         if x < m and y < m: return self.RESIZE_TL
         if x > w - m and y < m: return self.RESIZE_TR
         if x < m and y > h - m: return self.RESIZE_BL
         if x > w - m and y > h - m: return self.RESIZE_BR
-
         if x < m: return self.RESIZE_L
         if x > w - m: return self.RESIZE_R
         if y < m: return self.RESIZE_T
         if y > h - m: return self.RESIZE_B
-
         return self.MOVE
 
     def _set_cursor_shape(self, mode):
@@ -135,14 +140,11 @@ class ResizableDraggableContainer(QWidget):
             mode = self._get_resize_mode(event.pos())
             self._set_cursor_shape(mode)
             return
-
         if self.mode == self.NONE or not self.drag_start_pos: return
-
         curr_pos = event.globalPosition().toPoint()
         delta = curr_pos - self.drag_start_pos
         dx, dy = delta.x(), delta.y()
         r = QRect(self.rect_start)
-
         if self.mode == self.MOVE: r.translate(dx, dy)
         elif self.mode == self.RESIZE_BR:
             r.setWidth(max(self.MIN_SIZE, self.rect_start.width() + dx))
@@ -174,7 +176,6 @@ class ResizableDraggableContainer(QWidget):
             new_h = max(self.MIN_SIZE, self.rect_start.height() - dy)
             r.setTop(self.rect_start.bottom() - new_h)
             r.setHeight(new_h)
-
         self.setGeometry(r)
 
     def mouseReleaseEvent(self, event):
@@ -185,32 +186,24 @@ class ImageContainer(ResizableDraggableContainer):
     def __init__(self, pixmap, title_text, parent=None, image_path=None):
         super().__init__(parent)
         self.image_path = image_path 
-        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        
         self.lbl_title = QLabel(title_text)
         self.lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_title.setStyleSheet("background-color: rgba(50,50,50,200); color: #fff; font-weight: bold; padding: 2px;")
+        self.lbl_title.setStyleSheet("background-color: rgba(42, 130, 218, 200); color: #fff; font-weight: bold; padding: 2px;")
         self.lbl_title.setFixedHeight(20)
         layout.addWidget(self.lbl_title)
-        
         self.lbl_image = QLabel()
         self.lbl_image.setScaledContents(True)
         self.lbl_image.setPixmap(pixmap)
         self.lbl_image.setStyleSheet("border: none; background: transparent;")
         layout.addWidget(self.lbl_image)
-        
         self.original_pixmap = pixmap
-        
-        # Initial geometry based on image aspect ratio
         start_w = 400
         aspect = pixmap.height() / pixmap.width()
         start_h = int(start_w * aspect) + 20
         self.resize(start_w, start_h)
-        
-        # Transparent for mouse so the container catches events
         self.lbl_title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.lbl_image.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
@@ -218,18 +211,14 @@ class ImageContainer(ResizableDraggableContainer):
 class TextContainer(ResizableDraggableContainer):
     def __init__(self, text="", parent=None):
         super().__init__(parent)
-        
         layout = QVBoxLayout(self)
-        # Margins provide grab area around the text
         layout.setContentsMargins(10, 10, 10, 10)
-        
         self.text_edit = QTextEdit()
         self.text_edit.setText(text)
         self.text_edit.setFont(QFont("Arial", 12))
-        # Transparent background, no border for the text edit itself
-        self.text_edit.setStyleSheet("background-color: transparent; border: none; color: black;")
+        # CHANGED: Text color to black to match white paper background
+        self.text_edit.setStyleSheet("background-color: transparent; border: none; color: #000;")
         layout.addWidget(self.text_edit)
-        
         self.resize(250, 150)
 
 class ResearchTreeWidget(QTreeWidget):
@@ -240,6 +229,8 @@ class ResearchTreeWidget(QTreeWidget):
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setHeaderHidden(False)
+        self.setStyleSheet("QTreeWidget { font-size: 13px; } QHeaderView::section { background-color: #333; color: white; }")
 
     def dropEvent(self, event):
         super().dropEvent(event)
@@ -251,16 +242,14 @@ class ConfigManager:
     def load_config():
         if os.path.exists(CONFIG_FILE):
             try:
-                with open(CONFIG_FILE, 'r') as f:
-                    return json.load(f)
+                with open(CONFIG_FILE, 'r') as f: return json.load(f)
             except: pass
         return {}
 
     @staticmethod
     def save_config(data):
         try:
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(data, f, indent=4)
+            with open(CONFIG_FILE, 'w') as f: json.dump(data, f, indent=4)
         except: pass
 
     @staticmethod
@@ -290,20 +279,12 @@ class ConfigManager:
 # --- HELPER: FIND WOLFRAM ---
 def locate_wolfram_engine():
     custom_path = ConfigManager.get_wolfram_path()
-    if custom_path and os.path.exists(custom_path):
-        return custom_path
-    
-    manual_checks = [
-        "/usr/local/bin/wolframscript",
-        "/opt/homebrew/bin/wolframscript",
-        "/usr/bin/wolframscript"
-    ]
+    if custom_path and os.path.exists(custom_path): return custom_path
+    manual_checks = ["/usr/local/bin/wolframscript", "/opt/homebrew/bin/wolframscript", "/usr/bin/wolframscript"]
     for p in manual_checks:
         if os.path.exists(p): return p
-
     path = shutil.which("wolframscript")
     if path: return path
-
     paths = [
         "/Applications/WolframScript.app/Contents/MacOS/wolframscript",
         "/Applications/Mathematica.app/Contents/MacOS/wolframscript",
@@ -315,81 +296,53 @@ def locate_wolfram_engine():
 
 def sanitize_app_path(path):
     if path.endswith(".app"):
-        possible_bins = [
-            os.path.join(path, "Contents", "MacOS", "wolframscript"),
-            os.path.join(path, "Contents", "MacOS", "WolframKernel") 
-        ]
+        possible_bins = [os.path.join(path, "Contents", "MacOS", "wolframscript"),
+                         os.path.join(path, "Contents", "MacOS", "WolframKernel")]
         for p in possible_bins:
             if os.path.exists(p): return p
     return path
 
-# --- DRAWING WIDGET (IMPROVED) ---
+# --- DRAWING WIDGET ---
 class ScribbleArea(QWidget):
     MODE_DRAW = 0
     MODE_ERASE = 1
     MODE_TEXT = 2
-    MODE_IMAGE = 3 
+    MODE_IMAGE = 3
+    MODE_HIGHLIGHT = 4 
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StaticContents)
-        
-        # Canvas Size
         self.canvas_width = 2000
         self.canvas_height = 2000
         self.setFixedSize(self.canvas_width, self.canvas_height)
-        
         self.current_mode = self.MODE_DRAW
         self.scribbling = False
         self.myPenWidth = 2
+        # CHANGED: Default pen color Black, Background White
         self.myPenColor = Qt.GlobalColor.black
-        
         self.show_grid = False
         self.undo_stack = []
-        
-        # Transparent Background Layer (Pixels)
         self.image = QImage(self.canvas_width, self.canvas_height, QImage.Format.Format_ARGB32_Premultiplied)
-        self.image.fill(Qt.GlobalColor.white)
+        self.image.fill(Qt.GlobalColor.white) 
         self.lastPoint = QPoint()
 
     def set_mode(self, mode):
         self.current_mode = mode
-        if mode == self.MODE_TEXT:
-            self.setCursor(Qt.CursorShape.IBeamCursor)
-        elif mode == self.MODE_ERASE:
-            self.setCursor(Qt.CursorShape.CrossCursor)
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+        if mode == self.MODE_TEXT: self.setCursor(Qt.CursorShape.IBeamCursor)
+        elif mode == self.MODE_ERASE: self.setCursor(Qt.CursorShape.CrossCursor)
+        elif mode == self.MODE_HIGHLIGHT: self.setCursor(Qt.CursorShape.ArrowCursor)
+        else: self.setCursor(Qt.CursorShape.ArrowCursor)
 
-    def set_pen_color(self, color):
-        self.myPenColor = color
-
-    def set_pen_width(self, width):
-        self.myPenWidth = width
+    def set_pen_color(self, color): self.myPenColor = color
+    def set_pen_width(self, width): self.myPenWidth = width
 
     def toggle_grid(self, show):
         self.show_grid = show
         self.update()
 
-    def extend_page(self, added_height=1000):
-        self.canvas_height += added_height
-        self.setFixedSize(self.canvas_width, self.canvas_height)
-        
-        # Create new image and copy old one
-        new_image = QImage(self.canvas_width, self.canvas_height, QImage.Format.Format_ARGB32_Premultiplied)
-        new_image.fill(Qt.GlobalColor.white)
-        
-        painter = QPainter(new_image)
-        painter.drawImage(0, 0, self.image)
-        painter.end()
-        
-        self.image = new_image
-        self.update()
-
     def save_undo_state(self):
-        # Limit stack size
-        if len(self.undo_stack) > 10:
-            self.undo_stack.pop(0)
+        if len(self.undo_stack) > 10: self.undo_stack.pop(0)
         self.undo_stack.append(self.image.copy())
 
     def undo(self):
@@ -399,54 +352,32 @@ class ScribbleArea(QWidget):
 
     def clear_canvas(self):
         self.save_undo_state()
+        # CHANGED: Fill with White
         self.image.fill(Qt.GlobalColor.white)
-        # Remove floating widgets
         for child in self.children():
-            if isinstance(child, (ImageContainer, TextContainer)):
-                child.deleteLater()
+            if isinstance(child, (ImageContainer, TextContainer)): child.deleteLater()
         self.update()
         
     def flatten_layers(self):
-        """Merges all floating widgets (Text/Images) into the background image."""
         self.save_undo_state()
-        
         painter = QPainter(self.image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Identify children to process
         children_to_process = [c for c in self.children() if isinstance(c, (ImageContainer, TextContainer))]
-        
         for child in children_to_process:
             pos = child.pos()
-            
             if isinstance(child, ImageContainer):
-                # Render the widget exactly as it appears (excluding the dashed border logic which is outside paintEvent usually, 
-                # but ResizableDraggableContainer draws border via stylesheet. We rely on render() grabbing the widget content)
-                # To avoid the border, we render the inner label? No, simpler to render the widget but we might catch the border.
-                # Actually, stylesheet borders are painted. 
-                # Best approach: Draw the pixmap directly for images.
-                
-                # Draw the title background and text
                 title_h = child.lbl_title.height()
-                painter.fillRect(pos.x(), pos.y(), child.width(), title_h, QColor(50, 50, 50, 200))
+                painter.fillRect(pos.x(), pos.y(), child.width(), title_h, QColor(42, 130, 218, 200))
                 painter.setPen(Qt.GlobalColor.white)
                 painter.drawText(QRect(pos.x(), pos.y(), child.width(), title_h), Qt.AlignmentFlag.AlignCenter, child.lbl_title.text())
-                
-                # Draw the image
                 pix = child.lbl_image.pixmap()
                 if pix:
                     img_rect = QRect(pos.x(), pos.y() + title_h, child.lbl_image.width(), child.lbl_image.height())
                     painter.drawPixmap(img_rect, pix)
-                
             elif isinstance(child, TextContainer):
-                # For text, we want the text content, but we need to account for the layout margins (10)
-                # child.text_edit is the inner widget.
                 inner_pos = child.mapToParent(child.text_edit.pos())
                 child.text_edit.render(painter, inner_pos)
-
-            # Remove the interactive widget
             child.deleteLater()
-            
         painter.end()
         self.update()
 
@@ -455,16 +386,14 @@ class ScribbleArea(QWidget):
         if loaded_image.load(file_path):
             w = max(self.canvas_width, loaded_image.width())
             h = max(self.canvas_height, loaded_image.height())
-            
             if w > self.canvas_width or h > self.canvas_height:
                 self.canvas_width = w
                 self.canvas_height = h
                 self.setFixedSize(w, h)
                 self.image = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
-            
             loaded_image = loaded_image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
-            
             painter = QPainter(self.image)
+            # CHANGED: Background base is white
             painter.fillRect(self.image.rect(), Qt.GlobalColor.white)
             painter.drawImage(0, 0, loaded_image)
             painter.end()
@@ -477,28 +406,18 @@ class ScribbleArea(QWidget):
         painter = QPainter(self)
         rect = event.rect()
         painter.drawImage(rect, self.image, rect)
-        
-        if self.show_grid:
-            self._draw_grid_overlay(painter, rect)
+        if self.show_grid: self._draw_grid_overlay(painter, rect)
 
     def _draw_grid_overlay(self, painter, rect):
-        grid_pen = QPen(QColor(220, 230, 255))
-        grid_pen.setWidth(1)
+        grid_pen = QPen(QColor(200, 200, 200)) # Light grey grid for white paper
+        grid_pen.setStyle(Qt.PenStyle.DotLine)
         painter.setPen(grid_pen)
-        
         step = 40
-        l = rect.left()
-        r = rect.right()
-        t = rect.top()
-        b = rect.bottom()
-        
+        l, r, t, b = rect.left(), rect.right(), rect.top(), rect.bottom()
         start_x = (l // step) * step
         start_y = (t // step) * step
-        
-        for x in range(start_x, r + step, step):
-            painter.drawLine(x, t, x, b)
-        for y in range(start_y, b + step, step):
-            painter.drawLine(l, y, r, y)
+        for x in range(start_x, r + step, step): painter.drawLine(x, t, x, b)
+        for y in range(start_y, b + step, step): painter.drawLine(l, y, r, y)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -506,7 +425,7 @@ class ScribbleArea(QWidget):
                 self.add_text_widget(event.pos())
                 self.set_mode(self.MODE_DRAW) 
             else:
-                self.save_undo_state() # Push to history before drawing
+                self.save_undo_state()
                 self.lastPoint = event.position().toPoint()
                 self.scribbling = True
 
@@ -522,12 +441,17 @@ class ScribbleArea(QWidget):
     def drawLineTo(self, endPoint):
         painter = QPainter(self.image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        
         if self.current_mode == self.MODE_ERASE:
-            painter.setPen(QPen(Qt.GlobalColor.white, self.myPenWidth, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source) # Source copies the color directly
+            # Eraser draws White now
+            painter.setPen(QPen(Qt.GlobalColor.white, self.myPenWidth * 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        elif self.current_mode == self.MODE_HIGHLIGHT:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply) # Multiply works better for highlighter on white
+            pen = QPen(QColor(255, 255, 0), self.myPenWidth * 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap, Qt.PenJoinStyle.BevelJoin)
+            painter.setPen(pen)
         else:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
             painter.setPen(QPen(self.myPenColor, self.myPenWidth, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        
         painter.drawLine(self.lastPoint, endPoint)
         self.update()
         self.lastPoint = endPoint
@@ -551,16 +475,12 @@ class ScribbleArea(QWidget):
 class DataManager:
     @staticmethod
     def load_data(filepath):
-        if not os.path.exists(filepath):
-            return {"settings": {}, "topics": []}
+        if not os.path.exists(filepath): return {"settings": {}, "topics": []}
         try:
             with open(filepath, "r") as f:
                 raw_data = json.load(f)
-                if isinstance(raw_data, list):
-                    data_wrapper = {"settings": {}, "topics": raw_data}
-                else:
-                    data_wrapper = raw_data
-                return data_wrapper
+                if isinstance(raw_data, list): return {"settings": {}, "topics": raw_data}
+                return raw_data
         except Exception as e:
             print(f"Load Error: {e}")
             return {"settings": {}, "topics": []}
@@ -568,10 +488,8 @@ class DataManager:
     @staticmethod
     def save_data(data_wrapper, filepath):
         try:
-            with open(filepath, "w") as f:
-                json.dump(data_wrapper, f, indent=4)
-        except IOError as e:
-            print(f"Error saving file: {e}")
+            with open(filepath, "w") as f: json.dump(data_wrapper, f, indent=4)
+        except IOError as e: print(f"Error saving file: {e}")
 
 # --- MATH RENDERER ---
 def render_content_to_pixmap(text_content, fontsize=14):
@@ -580,42 +498,33 @@ def render_content_to_pixmap(text_content, fontsize=14):
         math_pattern = r'\$.*?\$'
         lines = []
         paragraphs = text_content.split('\n')
-        
         wrap_width = int(80 * (14.0 / fontsize))
-        
         for paragraph in paragraphs:
             math_chunks = re.findall(math_pattern, paragraph)
             placeholder_text = paragraph
             for i, chunk in enumerate(math_chunks):
                 placeholder_text = placeholder_text.replace(chunk, f"__MATH_{i}__", 1)
-            
             wrapped = textwrap.wrap(placeholder_text, width=wrap_width)
             if not wrapped and not paragraph.strip(): wrapped = [""]
-
             for i, line in enumerate(wrapped):
                 for j, chunk in enumerate(math_chunks):
                     placeholder = f"__MATH_{j}__"
                     if placeholder in line: line = line.replace(placeholder, chunk)
                 wrapped[i] = line
             lines.extend(wrapped)
-
         final_text = "\n".join(lines)
         line_height_factor = 0.035 * fontsize
         height = max(0.5, len(lines) * line_height_factor)
-        
-        fig = Figure(figsize=(10.0, height), dpi=150)
+        fig = Figure(figsize=(10.0, height), dpi=150, facecolor='#252525') 
         canvas = FigureCanvasAgg(fig)
-        
-        fig.text(0.01, 0.98, final_text, fontsize=fontsize, 
+        fig.text(0.01, 0.98, final_text, fontsize=fontsize, color='white',
                  horizontalalignment='left', verticalalignment='top')
         canvas.draw()
-        
         buf = BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
+        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, facecolor=fig.get_facecolor())
         buf.seek(0)
         return QPixmap.fromImage(QImage.fromData(buf.getvalue()))
-    except Exception:
-        return None
+    except Exception: return None
 
 # --- SETTINGS DIALOG ---
 class SettingsDialog(QDialog):
@@ -624,35 +533,25 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Settings")
         self.setGeometry(300, 300, 300, 200)
         self.interval = current_interval
-        
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Auto-Save Interval:"))
-        
         self.group = QButtonGroup(self)
         self.r1 = QRadioButton("Manual Only")
         self.r2 = QRadioButton("30 Seconds")
         self.r3 = QRadioButton("1 Minute")
         self.r4 = QRadioButton("5 Minutes")
-        
         self.group.addButton(self.r1, 0)
         self.group.addButton(self.r2, 30000)
         self.group.addButton(self.r3, 60000)
         self.group.addButton(self.r4, 300000)
-        
         btn = self.group.button(current_interval)
         if btn: btn.setChecked(True)
         else: self.r1.setChecked(True)
-        
-        layout.addWidget(self.r1)
-        layout.addWidget(self.r2)
-        layout.addWidget(self.r3)
-        layout.addWidget(self.r4)
-        
+        layout.addWidget(self.r1); layout.addWidget(self.r2); layout.addWidget(self.r3); layout.addWidget(self.r4)
         btn_save = QPushButton("Save Settings")
         btn_save.clicked.connect(self.save_and_close)
         layout.addWidget(btn_save)
         self.setLayout(layout)
-        
     def save_and_close(self):
         self.interval = self.group.checkedId()
         self.accept()
@@ -671,12 +570,16 @@ class PhysicsApp(QMainWindow):
         
         self.current_idea_id = None
         self.autosave_interval = self.settings.get("autosave_interval", 0)
-        
         self.latex_pixmap_original = None
+        self.tree_undo_stack = [] # Stack for Tree Structure Undo
+        
+        self.render_timer = QTimer()
+        self.render_timer.setSingleShot(True)
+        self.render_timer.setInterval(1000) 
+        self.render_timer.timeout.connect(self.render_preview)
         
         self.timer = QTimer()
-        if self.autosave_interval > 0:
-            self.timer.start(self.autosave_interval)
+        if self.autosave_interval > 0: self.timer.start(self.autosave_interval)
         self.timer.timeout.connect(self.auto_save)
         
         self.create_menu()
@@ -686,11 +589,9 @@ class PhysicsApp(QMainWindow):
     def create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu('File')
-        
         open_action = QAction('Open Database...', self)
         open_action.triggered.connect(self.open_database)
         file_menu.addAction(open_action)
-
         save_as_action = QAction('Save Database As...', self)
         save_as_action.triggered.connect(self.save_database_as)
         file_menu.addAction(save_as_action)
@@ -705,62 +606,89 @@ class PhysicsApp(QMainWindow):
         # 1. LEFT PANEL
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(5,5,5,5)
         
         left_label = QLabel("📚 Research Tree")
-        left_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        left_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         left_layout.addWidget(left_label)
 
         self.tree_widget = ResearchTreeWidget(self.on_tree_dropped)
         self.tree_widget.setColumnCount(2)
         self.tree_widget.setHeaderLabels(["Topic", "Status"])
-        self.tree_widget.setColumnWidth(0, 220) 
+        self.tree_widget.setColumnWidth(0, 160) # Narrower width
         self.tree_widget.itemClicked.connect(self.on_tree_select)
-        
         left_layout.addWidget(self.tree_widget, 1)
         
-        btn_layout = QHBoxLayout()
-        self.btn_root = QPushButton("New Topic")
+        # --- LEFT BUTTONS: 2x2 Grid Layout ---
+        tree_btn_layout = QGridLayout()
+        tree_btn_layout.setSpacing(5)
+        
+        self.btn_root = QPushButton("+ Root")
         self.btn_root.clicked.connect(self.add_root_topic)
-        self.btn_sub = QPushButton("Add Sub-topic")
+        self.btn_root.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
+        self.btn_sub = QPushButton("+ Child")
         self.btn_sub.clicked.connect(self.add_sub_topic)
-        btn_layout.addWidget(self.btn_root)
-        btn_layout.addWidget(self.btn_sub)
-        left_layout.addLayout(btn_layout)
+        self.btn_sub.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
-        self.btn_del = QPushButton("Delete Selected")
-        self.btn_del.setStyleSheet("color: #e57373;") 
+        self.btn_del = QPushButton("− Delete")
+        self.btn_del.setStyleSheet("color: #ff6b6b;") 
         self.btn_del.clicked.connect(self.delete_item)
-        left_layout.addWidget(self.btn_del)
+        self.btn_del.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
-        self.btn_save = QPushButton("Save All Changes")
-        self.btn_save.setStyleSheet("background-color: #007AFF; color: white; font-weight: bold; padding: 6px;")
+        self.btn_undo_tree = QPushButton("↩ Undo")
+        self.btn_undo_tree.setToolTip("Undo last structure change")
+        self.btn_undo_tree.clicked.connect(self.undo_tree_action)
+        self.btn_undo_tree.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
+        # Grid placement
+        tree_btn_layout.addWidget(self.btn_root, 0, 0)
+        tree_btn_layout.addWidget(self.btn_sub, 0, 1)
+        tree_btn_layout.addWidget(self.btn_del, 1, 0)
+        tree_btn_layout.addWidget(self.btn_undo_tree, 1, 1)
+        
+        left_layout.addLayout(tree_btn_layout)
+        
+        # --- BOTTOM BUTTONS: 1x2 Row ---
+        bottom_btns = QHBoxLayout()
+        self.btn_save = QPushButton("💾 Save All")
+        self.btn_save.setStyleSheet("background-color: #007AFF; color: white; font-weight: bold; padding: 6px; border-radius: 4px;")
         self.btn_save.clicked.connect(lambda: self.save_current_idea(manual=True))
-        left_layout.addWidget(self.btn_save)
-
-        self.btn_settings = QPushButton("⚙️ Settings")
+        
+        self.btn_settings = QPushButton("⚙️ Config")
         self.btn_settings.clicked.connect(self.open_settings)
-        left_layout.addWidget(self.btn_settings)
+        
+        bottom_btns.addWidget(self.btn_save)
+        bottom_btns.addWidget(self.btn_settings)
+        left_layout.addLayout(bottom_btns)
 
         # 2. RIGHT PANEL
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(5,5,5,5)
 
         # Header
         self.input_title = QLineEdit()
         self.input_title.setPlaceholderText("Topic Title")
-        self.input_title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.input_title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        self.input_title.setStyleSheet("padding: 5px; border: 1px solid #444; border-radius: 4px; background: #333; color: white;")
         self.input_title.textChanged.connect(self.update_title_live)
         
         self.combo_status = QComboBox()
         self.combo_status.addItems(["Idea", "Deriving", "Drafting", "Published", "Abandoned"])
+        self.combo_status.setStyleSheet("padding: 5px;")
+        # Trigger immediate color update on left panel
+        self.combo_status.currentIndexChanged.connect(self.update_tree_status_live)
+        
         header_layout = QHBoxLayout()
-        header_layout.addWidget(self.input_title)
+        header_layout.addWidget(self.input_title, 1)
         header_layout.addWidget(QLabel("Status:"))
         header_layout.addWidget(self.combo_status)
         right_layout.addLayout(header_layout)
 
         # Tabs
         self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("QTabWidget::pane { border: 1px solid #444; } QTabBar::tab { background: #333; color: #aaa; padding: 8px; } QTabBar::tab:selected { background: #555; color: white; }")
         
         # --- TAB 1: NOTES ---
         self.tab_notes = QWidget()
@@ -770,13 +698,15 @@ class PhysicsApp(QMainWindow):
         self.input_content = QTextEdit()
         self.input_content.setPlaceholderText("Notes & Derivations... (Use $...$ for LaTeX)")
         self.input_content.setFont(QFont("Consolas", 11))
+        self.input_content.setStyleSheet("background-color: #252525; color: #e0e0e0; border: none; padding: 5px;")
+        self.input_content.textChanged.connect(lambda: self.render_timer.start())
         
         preview_container = QWidget()
         preview_layout = QVBoxLayout(preview_container)
         preview_layout.setContentsMargins(0,0,0,0)
         
         prev_ctrl_layout = QHBoxLayout()
-        self.btn_render = QPushButton("Update Preview")
+        self.btn_render = QPushButton("Force Update Preview")
         self.btn_render.clicked.connect(self.render_preview)
         
         self.spin_font_size = QSpinBox()
@@ -796,13 +726,14 @@ class PhysicsApp(QMainWindow):
         prev_ctrl_layout.addWidget(self.slider_latex_zoom)
         prev_ctrl_layout.addStretch()
 
-        self.lbl_preview = QLabel("Math Preview")
+        self.lbl_preview = QLabel("Math Preview (Auto-updates)")
         self.lbl_preview.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.lbl_preview.setStyleSheet("background: white; padding: 10px;")
+        self.lbl_preview.setStyleSheet("background: #252525; padding: 10px; color: #888;")
         
         self.preview_scroll = QScrollArea()
         self.preview_scroll.setWidget(self.lbl_preview)
         self.preview_scroll.setWidgetResizable(True)
+        self.preview_scroll.setStyleSheet("background: #252525; border: none;")
         
         preview_layout.addLayout(prev_ctrl_layout)
         preview_layout.addWidget(self.preview_scroll)
@@ -811,37 +742,36 @@ class PhysicsApp(QMainWindow):
         notes_splitter.addWidget(preview_container)
         notes_layout.addWidget(notes_splitter)
         
-        # --- TAB 2: SCRATCH PAPER (IMPROVED) ---
+        # --- TAB 2: SCRATCH PAPER ---
         self.tab_scratch = QWidget()
         scratch_main_layout = QVBoxLayout(self.tab_scratch)
         
-        # Toolbar
         scratch_toolbar = QFrame()
-        scratch_toolbar.setStyleSheet("background-color: #e0e0e0; border-bottom: 1px solid #aaa;")
+        scratch_toolbar.setStyleSheet("background-color: #444; border-bottom: 1px solid #555;")
         st_layout = QHBoxLayout(scratch_toolbar)
         st_layout.setContentsMargins(5, 4, 5, 4)
         
-        # Undo
-        btn_undo = QPushButton("↩ Undo")
-        btn_undo.setFixedWidth(60)
+        btn_undo = QPushButton(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack), "Undo")
         btn_undo.clicked.connect(lambda: self.scribble_area.undo())
         st_layout.addWidget(btn_undo)
         
-        # Separator
         line = QFrame()
         line.setFrameShape(QFrame.Shape.VLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
         st_layout.addWidget(line)
 
-        # Pen Control
         btn_pen = QPushButton("✏️ Pen")
         btn_pen.setCheckable(True)
         btn_pen.setChecked(True)
         btn_pen.clicked.connect(lambda: self.set_scratch_mode(ScribbleArea.MODE_DRAW, btn_pen))
         
-        self.btn_color = QPushButton("Color")
-        self.btn_color.setStyleSheet("background-color: black; color: white; border: 1px solid gray;")
-        self.btn_color.setFixedWidth(50)
+        btn_high = QPushButton("🖍️ Highlt")
+        btn_high.setCheckable(True)
+        btn_high.clicked.connect(lambda: self.set_scratch_mode(ScribbleArea.MODE_HIGHLIGHT, btn_high))
+        
+        self.btn_color = QPushButton()
+        self.btn_color.setFixedSize(24, 24)
+        self.btn_color.setStyleSheet("background-color: black; border: 1px solid gray; border-radius: 12px;")
         self.btn_color.clicked.connect(self.select_pen_color)
         
         self.spin_width = QSpinBox()
@@ -851,16 +781,17 @@ class PhysicsApp(QMainWindow):
         self.spin_width.valueChanged.connect(self.update_pen_width)
         
         st_layout.addWidget(btn_pen)
+        st_layout.addWidget(btn_high)
         st_layout.addWidget(self.btn_color)
         st_layout.addWidget(self.spin_width)
 
-        # Eraser
         btn_erase = QPushButton("⬜ Eraser")
         btn_erase.setCheckable(True)
         btn_erase.clicked.connect(lambda: self.set_scratch_mode(ScribbleArea.MODE_ERASE, btn_erase))
         st_layout.addWidget(btn_erase)
         
-        # Tools
+        st_layout.addWidget(line)
+        
         btn_text = QPushButton("T Text")
         btn_text.clicked.connect(lambda: self.set_scratch_mode(ScribbleArea.MODE_TEXT, None))
         
@@ -870,36 +801,31 @@ class PhysicsApp(QMainWindow):
         st_layout.addWidget(btn_text)
         st_layout.addWidget(btn_img)
         
-        # Flatten Tool
         btn_flatten = QPushButton("⬇ Merge")
         btn_flatten.setToolTip("Merge text and images into the background layer")
         btn_flatten.clicked.connect(lambda: self.scribble_area.flatten_layers())
         st_layout.addWidget(btn_flatten)
         
-        # View/Page Controls
         check_grid = QCheckBox("Grid")
         check_grid.toggled.connect(lambda c: self.scribble_area.toggle_grid(c))
         st_layout.addWidget(check_grid)
         
-        btn_extend = QPushButton("⏬ Extend Page")
-        btn_extend.clicked.connect(lambda: self.scribble_area.extend_page())
-        st_layout.addWidget(btn_extend)
-
         st_layout.addStretch()
         
         btn_clear_scratch = QPushButton("🗑️ Clear")
         btn_clear_scratch.clicked.connect(self.clear_scratch)
         st_layout.addWidget(btn_clear_scratch)
         
-        # Group logic for Pen/Eraser buttons
         self.scratch_btn_group = QButtonGroup(self)
         self.scratch_btn_group.addButton(btn_pen)
         self.scratch_btn_group.addButton(btn_erase)
+        self.scratch_btn_group.addButton(btn_high)
         
         self.scribble_area = ScribbleArea()
         scratch_scroll = QScrollArea()
         scratch_scroll.setWidget(self.scribble_area)
         scratch_scroll.setWidgetResizable(True)
+        scratch_scroll.setStyleSheet("background: #202020;")
         
         scratch_main_layout.addWidget(scratch_toolbar)
         scratch_main_layout.addWidget(scratch_scroll)
@@ -907,50 +833,44 @@ class PhysicsApp(QMainWindow):
         # --- TAB 3: MATHEMATICA ---
         self.tab_wolfram = QWidget()
         wolf_layout = QVBoxLayout(self.tab_wolfram)
-        
         self.wolf_main_splitter = QSplitter(Qt.Orientation.Vertical)
         
-        # Top: Input
         top_w = QWidget()
         top_l = QVBoxLayout(top_w)
         top_l.setContentsMargins(0,0,0,0)
-        top_l.addWidget(QLabel("<b>Code Input:</b>"))
+        top_l.addWidget(QLabel("<b>Wolfram Input:</b>"))
         
-        code_font = QFont("Consolas", 12)
-        code_font.setStyleHint(QFont.StyleHint.Monospace)
-
         self.input_wolfram = QTextEdit()
-        self.input_wolfram.setFont(code_font)
+        self.input_wolfram.setFont(QFont("Consolas", 12))
         self.input_wolfram.setPlaceholderText("Integrate[x^2, x]\nPlot[Sin[x],{x,0,10}]")
-        self.input_wolfram.setStyleSheet("background-color: #f5f5f5; color: #333;")
+        self.input_wolfram.setStyleSheet("background-color: #252525; color: #fff;")
         top_l.addWidget(self.input_wolfram)
-        self.btn_run_wolf = QPushButton("▶ Run Code")
-        self.btn_run_wolf.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        
+        self.btn_run_wolf = QPushButton("▶ Run Code (Shift+Enter)")
+        self.btn_run_wolf.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 5px;")
         self.btn_run_wolf.clicked.connect(self.run_wolfram_code)
+        short = QAction(self)
+        short.setShortcut("Shift+Return")
+        short.triggered.connect(self.run_wolfram_code)
+        self.addAction(short)
         top_l.addWidget(self.btn_run_wolf)
         
-        # Bottom: Output Splitter
         self.wolf_out_splitter = QSplitter(Qt.Orientation.Vertical)
-        
-        # Text Output
         self.output_wolfram = QTextEdit()
         self.output_wolfram.setReadOnly(True)
-        self.output_wolfram.setFont(code_font)
-        self.output_wolfram.setPlaceholderText("Output Text...")
-        self.output_wolfram.setStyleSheet("background-color: #222; color: #00FF00;")
+        self.output_wolfram.setFont(QFont("Consolas", 11))
+        self.output_wolfram.setPlaceholderText("Results...")
+        self.output_wolfram.setStyleSheet("background-color: #1e1e1e; color: #00FF00;")
         
-        # Graphics Area (Freeform Canvas)
         gfx_widget = QWidget()
         gfx_layout = QVBoxLayout(gfx_widget)
         gfx_layout.setContentsMargins(0,0,0,0)
         
         self.wolfram_scroll = QScrollArea()
-        self.wolfram_scroll.setStyleSheet("background-color: #333;")
-        
+        self.wolfram_scroll.setStyleSheet("background-color: #2e2e2e;")
         self.wolfram_canvas = QWidget()
-        self.wolfram_canvas.setFixedSize(3000, 3000) # Large virtual canvas
+        self.wolfram_canvas.setFixedSize(3000, 3000)
         self.wolfram_canvas.setStyleSheet("background-color: #2e2e2e;")
-        
         self.wolfram_scroll.setWidget(self.wolfram_canvas)
         
         zoom_layout = QHBoxLayout()
@@ -966,16 +886,19 @@ class PhysicsApp(QMainWindow):
         
         self.wolf_out_splitter.addWidget(self.output_wolfram)
         self.wolf_out_splitter.addWidget(gfx_widget)
-        
         self.wolf_main_splitter.addWidget(top_w)
         self.wolf_main_splitter.addWidget(self.wolf_out_splitter)
-        
         wolf_layout.addWidget(self.wolf_main_splitter)
 
-        # --- TAB 4: REFERENCES ---
+        # --- TAB 4: PHOTO NOTES (Updated) ---
+        self.tab_photos = QWidget()
+        self.init_photo_tab()
+
+        # --- TAB 5: REFERENCES ---
         self.tab_refs = QWidget()
         ref_layout = QVBoxLayout(self.tab_refs)
         self.ref_list = QListWidget()
+        self.ref_list.setStyleSheet("background: #252525; color: white;")
         self.ref_list.itemDoubleClicked.connect(self.open_reference)
         
         ref_btns = QHBoxLayout()
@@ -996,6 +919,7 @@ class PhysicsApp(QMainWindow):
 
         self.tabs.addTab(self.tab_notes, "📝 Notes")
         self.tabs.addTab(self.tab_scratch, "✏️ Scratch Paper")
+        self.tabs.addTab(self.tab_photos, "📷 Photo Notes")
         self.tabs.addTab(self.tab_wolfram, "🐺 Mathematica")
         self.tabs.addTab(self.tab_refs, "🔗 References")
 
@@ -1010,19 +934,79 @@ class PhysicsApp(QMainWindow):
         self.refresh_tree()
         self.enable_right_panel(False)
 
+    def init_photo_tab(self):
+        layout = QVBoxLayout(self.tab_photos)
+        
+        toolbar = QHBoxLayout()
+        btn_add = QPushButton("Add Photo")
+        btn_add.clicked.connect(self.add_photo_note)
+        btn_del = QPushButton("Delete Selected")
+        btn_del.clicked.connect(self.delete_photo_note)
+        
+        toolbar.addWidget(btn_add)
+        toolbar.addWidget(btn_del)
+        toolbar.addStretch()
+        
+        self.photo_list = QListWidget()
+        self.photo_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.photo_list.setIconSize(QSize(200, 200))
+        self.photo_list.setSpacing(15)
+        self.photo_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.photo_list.setMovement(QListWidget.Movement.Static) # No dragging
+        self.photo_list.setStyleSheet("""
+            QListWidget { background: #222; } 
+            QListWidget::item { color: white; padding: 5px; } 
+            QListWidget::item:selected { background-color: #0078d7; border-radius: 5px; }
+        """)
+        self.photo_list.itemDoubleClicked.connect(self.open_photo_note)
+        
+        layout.addLayout(toolbar)
+        layout.addWidget(self.photo_list)
+
+    # --- UNDO SYSTEM ---
+    def save_tree_state(self):
+        """ Snapshots the current data state for undo. """
+        if len(self.tree_undo_stack) > 20: self.tree_undo_stack.pop(0)
+        self.tree_undo_stack.append(copy.deepcopy(self.data))
+        self.btn_undo_tree.setEnabled(True)
+
+    def undo_tree_action(self):
+        if not self.tree_undo_stack: return
+        self.data = self.tree_undo_stack.pop()
+        self.data_wrapper['topics'] = self.data
+        DataManager.save_data(self.data_wrapper, self.current_file)
+        
+        # Restore Tree
+        current_id = self.current_idea_id
+        self.refresh_tree()
+        
+        # Try to reselect current item if it exists
+        if current_id:
+            it = QTreeWidgetItemIterator(self.tree_widget)
+            found = False
+            while it.value():
+                if it.value().data(0, Qt.ItemDataRole.UserRole) == current_id:
+                    self.tree_widget.setCurrentItem(it.value())
+                    found = True
+                    break
+                it += 1
+            if not found:
+                self.current_idea_id = None
+                self.enable_right_panel(False)
+        
+        if not self.tree_undo_stack: self.btn_undo_tree.setEnabled(False)
+        self.statusBar().showMessage("Undid last structure change.", 2000)
+
     # --- SCRATCHPAD HELPERS ---
     def set_scratch_mode(self, mode, btn=None):
         self.scribble_area.set_mode(mode)
-        # Ensure buttons reflect state (if set programmatically)
-        if btn:
-            btn.setChecked(True)
+        if btn: btn.setChecked(True)
 
     def select_pen_color(self):
         c = QColorDialog.getColor(self.scribble_area.myPenColor, self, "Pen Color")
         if c.isValid():
             self.scribble_area.set_pen_color(c)
-            # Update button style to show color, but keep text readable (simplified)
-            self.btn_color.setStyleSheet(f"background-color: {c.name()}; border: 1px solid gray;")
+            self.btn_color.setStyleSheet(f"background-color: {c.name()}; border: 1px solid gray; border-radius: 12px;")
 
     def update_pen_width(self):
         w = self.spin_width.value()
@@ -1034,7 +1018,6 @@ class PhysicsApp(QMainWindow):
         if path:
             self.scribble_area.add_image_widget(path, "Imported")
             self.set_scratch_mode(ScribbleArea.MODE_DRAW)
-            # Reset pen button visual
             for btn in self.scratch_btn_group.buttons():
                 if "Pen" in btn.text(): btn.setChecked(True)
 
@@ -1049,7 +1032,31 @@ class PhysicsApp(QMainWindow):
             idea = self.get_idea_by_id(self.current_idea_id)
             if idea: idea['title'] = text
 
+    def get_status_brush(self, status):
+        status_colors = {
+            "Idea": QBrush(QColor(100, 200, 255)),
+            "Deriving": QBrush(QColor(255, 200, 100)),
+            "Drafting": QBrush(QColor(200, 100, 255)),
+            "Published": QBrush(QColor(100, 255, 100)),
+            "Abandoned": QBrush(QColor(150, 150, 150))
+        }
+        return status_colors.get(status, QBrush(Qt.GlobalColor.white))
+
+    def update_tree_status_live(self):
+        """Immediately update the tree item when the combobox changes."""
+        text = self.combo_status.currentText()
+        item = self.tree_widget.currentItem()
+        if item:
+            item.setText(1, text)
+            item.setForeground(1, self.get_status_brush(text))
+        
+        # Update data model immediately so saving works correctly even if we don't click save yet
+        if self.current_idea_id:
+            idea = self.get_idea_by_id(self.current_idea_id)
+            if idea: idea['status'] = text
+
     def on_tree_dropped(self):
+        self.save_tree_state() # Undo point
         new_data_list = []
         def traverse(item, parent_id):
             idea_id = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1064,8 +1071,7 @@ class PhysicsApp(QMainWindow):
             for i in range(item.childCount()):
                 traverse(item.child(i), idea_id)
         root = self.tree_widget.invisibleRootItem()
-        for i in range(root.childCount()):
-            traverse(root.child(i), None)
+        for i in range(root.childCount()): traverse(root.child(i), None)
         self.data = new_data_list
         self.data_wrapper['topics'] = self.data
         DataManager.save_data(self.data_wrapper, self.current_file)
@@ -1086,7 +1092,6 @@ class PhysicsApp(QMainWindow):
     # --- WOLFRAM EXECUTION ---
     def update_wolfram_zoom(self):
         scale_percent = self.slider_wolf_zoom.value()
-        # Iterate over ImageContainers in the canvas
         for child in self.wolfram_canvas.findChildren(ImageContainer):
             orig = child.original_pixmap
             if orig and not orig.isNull():
@@ -1100,38 +1105,19 @@ class PhysicsApp(QMainWindow):
     def run_wolfram_code(self):
         code = self.input_wolfram.toPlainText().strip()
         if not code: return
-        
         if not self.current_idea_id:
             QMessageBox.warning(self, "No Topic", "Please select or create a topic first.")
             return
 
         self.statusBar().showMessage("Running Mathematica code...")
         self.output_wolfram.setText("Processing...")
-        
-        # Clear existing images on canvas
-        for child in self.wolfram_canvas.findChildren(ImageContainer):
-            child.deleteLater()
-
+        for child in self.wolfram_canvas.findChildren(ImageContainer): child.deleteLater()
         QApplication.processEvents()
-
-        exe_path = locate_wolfram_engine()
         
+        exe_path = locate_wolfram_engine()
         if not exe_path:
-            resp = QMessageBox.question(self, "Wolfram Not Found", 
-                                        "Could not find 'wolframscript'. Locate manually?",
-                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if resp == QMessageBox.StandardButton.Yes:
-                fname, _ = QFileDialog.getOpenFileName(self, "Locate wolframscript", "/Applications")
-                if fname:
-                    safe_path = sanitize_app_path(fname)
-                    ConfigManager.set_wolfram_path(safe_path)
-                    exe_path = safe_path
-                else:
-                    self.output_wolfram.setText("Cancelled.")
-                    return
-            else:
-                self.output_wolfram.setText("Error: Execution engine not found.")
-                return
+            self.output_wolfram.setText("Error: Execution engine not found.")
+            return
 
         try:
             folder = os.path.dirname(TEMP_WOLFRAM_IMG_BASE)
@@ -1144,7 +1130,6 @@ class PhysicsApp(QMainWindow):
                 user_file.write(code)
                 user_code_path = user_file.name.replace("\\", "/")
 
-            # ROBUST RUNNER CODE
             runner_code = f"""
             imgBase = "{TEMP_WOLFRAM_IMG_BASE}";
             plotIdx = 0;
@@ -1173,10 +1158,7 @@ class PhysicsApp(QMainWindow):
                 runner_file.write(runner_code)
                 runner_path = runner_file.name
 
-            proc = subprocess.run(
-                [exe_path, '-file', runner_path],
-                capture_output=True, text=True, timeout=60
-            )
+            proc = subprocess.run([exe_path, '-file', runner_path], capture_output=True, text=True, timeout=60)
             
             try: os.remove(user_code_path)
             except: pass
@@ -1185,7 +1167,6 @@ class PhysicsApp(QMainWindow):
 
             output_str = ""
             final_output_lines = []
-            
             if proc.stdout: output_str += proc.stdout
             if proc.stderr: output_str += f"\nErrors:\n{proc.stderr}"
             
@@ -1200,7 +1181,6 @@ class PhysicsApp(QMainWindow):
                         idx = m.group(1)
                         temp_img_path = f"{TEMP_WOLFRAM_IMG_BASE}_{idx}.png"
                         if os.path.exists(temp_img_path):
-                            # Move to permanent storage
                             unique_name = f"wolf_{self.current_idea_id}_{uuid.uuid4().hex}.png"
                             perm_path = os.path.join(IMG_DIR, unique_name)
                             try:
@@ -1217,21 +1197,79 @@ class PhysicsApp(QMainWindow):
                                     plot_count += 1
                             except Exception as e:
                                 final_output_lines.append(f"[Error saving graphics: {e}]")
-
                         final_output_lines.append(f"[Graphics Generated: Plot {int(idx)+1}]")
                 else:
                     final_output_lines.append(line)
 
             self.output_wolfram.setText("\n".join(final_output_lines).strip())
-            
-            if has_graphics:
-                self.slider_wolf_zoom.setValue(100)
-                
+            if has_graphics: self.slider_wolf_zoom.setValue(100)
             self.statusBar().showMessage("Done.", 3000)
 
         except Exception as e:
             self.output_wolfram.setText(f"Execution Error: {str(e)}")
             self.statusBar().showMessage("Error.", 3000)
+
+    # --- PHOTO NOTES OPERATIONS ---
+    def add_photo_note(self):
+        if not self.current_idea_id: return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select Photos", "", "Images (*.jpg *.jpeg *.png *.bmp *.heic *.tif)")
+        if not paths: return
+        
+        for path in paths:
+            # Copy to images dir to keep it self-contained
+            ext = os.path.splitext(path)[1]
+            unique_name = f"photo_{self.current_idea_id}_{uuid.uuid4().hex}{ext}"
+            dest_path = os.path.join(IMG_DIR, unique_name)
+            try:
+                shutil.copy(path, dest_path)
+                self._add_photo_widget(dest_path)
+            except Exception as e:
+                print(f"Error copying photo: {e}")
+        
+        self.save_current_idea(manual=False)
+
+    def _add_photo_widget(self, path):
+        item = QListWidgetItem()
+        fname = os.path.basename(path)
+        
+        # CHANGED: Truncate long filenames for display
+        if len(fname) > 25:
+             display_text = fname[:12] + "..." + fname[-8:]
+             item.setText(display_text)
+        else:
+             item.setText(fname)
+        
+        # Set full path/name as tooltip
+        item.setToolTip(fname)
+        item.setData(Qt.ItemDataRole.UserRole, path)
+        
+        # Optimize: Create a scaled thumbnail for the UI so it doesn't lag
+        pix = QPixmap(path)
+        if pix.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+            item.setIcon(icon)
+        else:
+            # Scale down to 200x200 max for performance
+            thumb = pix.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            item.setIcon(QIcon(thumb))
+            
+        self.photo_list.addItem(item)
+
+    def delete_photo_note(self):
+        items = self.photo_list.selectedItems()
+        if not items: return
+        if QMessageBox.question(self, "Delete", "Delete selected photos?") == QMessageBox.StandardButton.Yes:
+            for item in items:
+                # Optionally delete file from disk? Keeping it safe for now by just removing reference.
+                # path = item.data(Qt.ItemDataRole.UserRole)
+                # if os.path.exists(path): os.remove(path)
+                self.photo_list.takeItem(self.photo_list.row(item))
+            self.save_current_idea(manual=False)
+
+    def open_photo_note(self, item):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path and os.path.exists(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     # --- FILE OPS ---
     def open_database(self):
@@ -1240,7 +1278,6 @@ class PhysicsApp(QMainWindow):
             if self.current_idea_id: self.save_current_idea()
             self.current_file = path
             ConfigManager.set_last_file(path)
-            
             self.data_wrapper = DataManager.load_data(path)
             self.data = self.data_wrapper["topics"]
             self.settings = self.data_wrapper["settings"]
@@ -1284,9 +1321,15 @@ class PhysicsApp(QMainWindow):
         roots = [d for d in self.data if d.get('parent_id') is None]
         children = [d for d in self.data if d.get('parent_id') is not None]
 
+        def create_item(data):
+            item = QTreeWidgetItem([data['title'], data.get('status', 'Idea')])
+            item.setData(0, Qt.ItemDataRole.UserRole, data['id'])
+            s = data.get('status', 'Idea')
+            item.setForeground(1, self.get_status_brush(s))
+            return item
+
         for item_data in roots:
-            tree_item = QTreeWidgetItem([item_data['title'], item_data.get('status', 'Idea')])
-            tree_item.setData(0, Qt.ItemDataRole.UserRole, item_data['id'])
+            tree_item = create_item(item_data)
             self.tree_widget.addTopLevelItem(tree_item)
             items_map[item_data['id']] = tree_item
 
@@ -1298,8 +1341,7 @@ class PhysicsApp(QMainWindow):
                 pid = item_data['parent_id']
                 if pid in items_map:
                     parent_item = items_map[pid]
-                    child_item = QTreeWidgetItem([item_data['title'], item_data.get('status', 'Idea')])
-                    child_item.setData(0, Qt.ItemDataRole.UserRole, item_data['id'])
+                    child_item = create_item(item_data)
                     parent_item.addChild(child_item)
                     items_map[item_data['id']] = child_item
                     parent_item.setExpanded(True)
@@ -1314,7 +1356,6 @@ class PhysicsApp(QMainWindow):
             self.current_idea_id = None
             self.enable_right_panel(False)
             return
-
         new_id = item.data(0, Qt.ItemDataRole.UserRole)
         self.current_idea_id = new_id
         self.load_idea_details(self.current_idea_id)
@@ -1336,6 +1377,7 @@ class PhysicsApp(QMainWindow):
             self.output_wolfram.clear()
             self.lbl_preview.clear()
             self.ref_list.clear()
+            self.photo_list.clear()
             for child in self.wolfram_canvas.findChildren(ImageContainer): child.deleteLater()
             self.scribble_area.clear_canvas()
 
@@ -1346,6 +1388,7 @@ class PhysicsApp(QMainWindow):
         self._add_item(curr.data(0, Qt.ItemDataRole.UserRole))
 
     def _add_item(self, parent_id):
+        self.save_tree_state() # Undo point
         new_id = str(uuid.uuid4())
         new_entry = {
             "id": new_id,
@@ -1358,6 +1401,7 @@ class PhysicsApp(QMainWindow):
             "wolfram_objects": [], 
             "scratch_objects": [], 
             "references": [],
+            "photos": [], # Photo Notes List
             "has_drawing": False,
             "date": datetime.now().strftime("%Y-%m-%d %H:%M")
         }
@@ -1381,16 +1425,15 @@ class PhysicsApp(QMainWindow):
         self.input_title.setText(idea.get('title', ''))
         self.input_title.blockSignals(False)
         
+        self.input_content.blockSignals(True)
         self.input_content.setText(idea.get('content', ''))
+        self.input_content.blockSignals(False)
         
-        # Wolfram
         self.input_wolfram.setText(idea.get('wolfram_code', ''))
         self.output_wolfram.setText(idea.get('wolfram_output', ''))
         
-        for child in self.wolfram_canvas.findChildren(ImageContainer):
-            child.deleteLater()
-            
-        # Restore Wolfram Plots
+        # Wolfram Images
+        for child in self.wolfram_canvas.findChildren(ImageContainer): child.deleteLater()
         saved_objs = idea.get('wolfram_objects', [])
         for obj in saved_objs:
             path = obj.get('path')
@@ -1406,8 +1449,11 @@ class PhysicsApp(QMainWindow):
         self.latex_pixmap_original = None
         self.slider_latex_zoom.setValue(100)
         
+        # Status
+        self.combo_status.blockSignals(True)
         idx = self.combo_status.findText(idea.get('status', 'Idea'))
         if idx >= 0: self.combo_status.setCurrentIndex(idx)
+        self.combo_status.blockSignals(False)
         
         # References
         self.ref_list.clear()
@@ -1416,12 +1462,17 @@ class PhysicsApp(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, ref)
             self.ref_list.addItem(item)
             
-        # Scratchpad Restore
+        # Photo Notes
+        self.photo_list.clear()
+        for p_path in idea.get('photos', []):
+            if os.path.exists(p_path):
+                self._add_photo_widget(p_path)
+
+        # Scratchpad
         self.scribble_area.clear_canvas()
         bg_path = os.path.join(IMG_DIR, f"{iid}_bg.png")
         if os.path.exists(bg_path): self.scribble_area.set_background_image(bg_path)
         
-        # Restore Floating Scratch Objects
         for obj in idea.get('scratch_objects', []):
             if obj['type'] == 'image' and os.path.exists(obj['path']):
                 ic = self.scribble_area.add_image_widget(obj['path'], obj.get('title', ''))
@@ -1434,7 +1485,6 @@ class PhysicsApp(QMainWindow):
 
     def save_current_idea(self, manual=False):
         ConfigManager.set_last_file(self.current_file)
-
         if not self.current_idea_id: 
             if manual: DataManager.save_data(self.data_wrapper, self.current_file)
             return
@@ -1449,7 +1499,7 @@ class PhysicsApp(QMainWindow):
             idea['wolfram_code'] = self.input_wolfram.toPlainText()
             idea['wolfram_output'] = self.output_wolfram.toPlainText()
             
-            # SAVE WOLFRAM OBJECTS
+            # Wolfram Objs
             objs = []
             for child in self.wolfram_canvas.findChildren(ImageContainer):
                 rect = child.geometry()
@@ -1460,12 +1510,9 @@ class PhysicsApp(QMainWindow):
                 })
             idea['wolfram_objects'] = objs
             
-            # SAVE SCRATCHPAD
-            # 1. Background
+            # Scratchpad
             bg_path = os.path.join(IMG_DIR, f"{idea['id']}_bg.png")
             self.scribble_area.save_background(bg_path)
-            
-            # 2. Floating Objects
             s_objs = []
             for child in self.scribble_area.children():
                 if isinstance(child, ImageContainer) and child.isVisible():
@@ -1485,20 +1532,28 @@ class PhysicsApp(QMainWindow):
                     })
             idea['scratch_objects'] = s_objs
             idea['has_drawing'] = True
+            
+            # Photo Notes
+            photo_paths = []
+            for i in range(self.photo_list.count()):
+                item = self.photo_list.item(i)
+                photo_paths.append(item.data(Qt.ItemDataRole.UserRole))
+            idea['photos'] = photo_paths
 
             DataManager.save_data(self.data_wrapper, self.current_file)
             
+            # Sync tree item text just in case (Color is handled by update_tree_status_live)
             iterator = QTreeWidgetItemIterator(self.tree_widget)
             while iterator.value():
                 item = iterator.value()
                 if item.data(0, Qt.ItemDataRole.UserRole) == self.current_idea_id:
-                    if item.text(1) != idea['status']: item.setText(1, idea['status'])
+                    if item.text(0) != idea['title']: item.setText(0, idea['title'])
                     break
                 iterator += 1
             
             if manual:
                 self.render_preview()
-                QMessageBox.information(self, "Saved", "All data saved.")
+                self.statusBar().showMessage("Saved successfully.", 2000)
         except Exception as e:
             print(f"Save failed: {e}")
 
@@ -1509,7 +1564,7 @@ class PhysicsApp(QMainWindow):
             self.latex_pixmap_original = pixmap
             self.update_latex_zoom()
         else: 
-            self.lbl_preview.setText("No text.")
+            self.lbl_preview.setText("No content to render.")
             self.latex_pixmap_original = None
 
     def add_reference_url(self):
@@ -1536,13 +1591,10 @@ class PhysicsApp(QMainWindow):
         if not ref_data: return
         path = ref_data.get('path', '')
         rtype = ref_data.get('type', 'url')
-        if rtype == 'url':
-            QDesktopServices.openUrl(QUrl(path))
+        if rtype == 'url': QDesktopServices.openUrl(QUrl(path))
         else:
-            if os.path.exists(path):
-                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-            else:
-                QMessageBox.warning(self, "File Not Found", f"Could not find file at:\n{path}")
+            if os.path.exists(path): QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            else: QMessageBox.warning(self, "File Not Found", f"Could not find file at:\n{path}")
 
     def delete_reference(self):
         row = self.ref_list.currentRow()
@@ -1557,6 +1609,7 @@ class PhysicsApp(QMainWindow):
         if not selected_items: return
         msg = f"Delete {len(selected_items)} topics and all their sub-topics?"
         if QMessageBox.question(self, "Delete", msg) == QMessageBox.StandardButton.Yes:
+            self.save_tree_state() # Undo point
             ids_to_delete = set()
             def add_children_of(pid):
                 for d in self.data:
@@ -1575,7 +1628,7 @@ class PhysicsApp(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyle("Fusion") 
+    apply_dark_theme(app)
     window = PhysicsApp()
     window.show()
     sys.exit(app.exec())
