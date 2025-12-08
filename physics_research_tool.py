@@ -122,7 +122,7 @@ class ResizableDraggableContainer(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.mode = self._get_resize_mode(event.pos())
-            self.drag_start_pos = event.globalPosition().toPoint()
+            self.drag_start_pos = event.scenePosition().toPoint()
             self.rect_start = self.geometry()
             self.raise_()
 
@@ -132,7 +132,9 @@ class ResizableDraggableContainer(QWidget):
             self._set_cursor_shape(mode)
             return
         if self.mode == self.NONE or not self.drag_start_pos: return
-        curr_pos = event.globalPosition().toPoint()
+        
+        curr_pos = event.scenePosition().toPoint()
+        
         delta = curr_pos - self.drag_start_pos
         dx, dy = delta.x(), delta.y()
         r = QRect(self.rect_start)
@@ -207,7 +209,6 @@ class TextContainer(ResizableDraggableContainer):
         self.text_edit = QTextEdit()
         self.text_edit.setText(text)
         self.text_edit.setFont(QFont("Arial", 12))
-        # CHANGED: Text color to black to match white paper background
         self.text_edit.setStyleSheet("background-color: transparent; border: none; color: #000;")
         layout.addWidget(self.text_edit)
         self.resize(250, 150)
@@ -310,7 +311,6 @@ class ScribbleArea(QWidget):
         self.current_mode = self.MODE_DRAW
         self.scribbling = False
         self.myPenWidth = 2
-        # CHANGED: Default pen color Black, Background White
         self.myPenColor = Qt.GlobalColor.black
         self.show_grid = False
         self.undo_stack = []
@@ -343,7 +343,6 @@ class ScribbleArea(QWidget):
 
     def clear_canvas(self):
         self.save_undo_state()
-        # CHANGED: Fill with White
         self.image.fill(Qt.GlobalColor.white)
         for child in self.children():
             if isinstance(child, (ImageContainer, TextContainer)): child.deleteLater()
@@ -384,7 +383,6 @@ class ScribbleArea(QWidget):
                 self.image = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
             loaded_image = loaded_image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
             painter = QPainter(self.image)
-            # CHANGED: Background base is white
             painter.fillRect(self.image.rect(), Qt.GlobalColor.white)
             painter.drawImage(0, 0, loaded_image)
             painter.end()
@@ -400,7 +398,7 @@ class ScribbleArea(QWidget):
         if self.show_grid: self._draw_grid_overlay(painter, rect)
 
     def _draw_grid_overlay(self, painter, rect):
-        grid_pen = QPen(QColor(200, 200, 200)) # Light grey grid for white paper
+        grid_pen = QPen(QColor(200, 200, 200)) 
         grid_pen.setStyle(Qt.PenStyle.DotLine)
         painter.setPen(grid_pen)
         step = 40
@@ -433,11 +431,10 @@ class ScribbleArea(QWidget):
         painter = QPainter(self.image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         if self.current_mode == self.MODE_ERASE:
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source) # Source copies the color directly
-            # Eraser draws White now
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source) 
             painter.setPen(QPen(Qt.GlobalColor.white, self.myPenWidth * 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         elif self.current_mode == self.MODE_HIGHLIGHT:
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply) # Multiply works better for highlighter on white
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply) 
             pen = QPen(QColor(255, 255, 0), self.myPenWidth * 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap, Qt.PenJoinStyle.BevelJoin)
             painter.setPen(pen)
         else:
@@ -482,40 +479,60 @@ class DataManager:
             with open(filepath, "w") as f: json.dump(data_wrapper, f, indent=4)
         except IOError as e: print(f"Error saving file: {e}")
 
-# --- MATH RENDERER ---
+# --- MATH RENDERER (Fixed: Smart Wrap + Auto-Crop) ---
 def render_content_to_pixmap(text_content, fontsize=14):
     if not text_content: return None
     try:
         math_pattern = r'\$.*?\$'
         lines = []
         paragraphs = text_content.split('\n')
-        wrap_width = int(80 * (14.0 / fontsize))
+        
+        # 1. Increase wrap width significantly (from 90 to 110).
+        # This prevents LaTeX-heavy lines from wrapping too early.
+        wrap_width = int(110 * (14.0 / fontsize))
+        
         for paragraph in paragraphs:
             math_chunks = re.findall(math_pattern, paragraph)
             placeholder_text = paragraph
             for i, chunk in enumerate(math_chunks):
-                placeholder_text = placeholder_text.replace(chunk, f"__MATH_{i}__", 1)
+                # Use a placeholder that is unique but not excessively long
+                placeholder_text = placeholder_text.replace(chunk, f"__M{i}__", 1)
+            
             wrapped = textwrap.wrap(placeholder_text, width=wrap_width)
             if not wrapped and not paragraph.strip(): wrapped = [""]
+            
             for i, line in enumerate(wrapped):
                 for j, chunk in enumerate(math_chunks):
-                    placeholder = f"__MATH_{j}__"
+                    placeholder = f"__M{j}__"
                     if placeholder in line: line = line.replace(placeholder, chunk)
                 wrapped[i] = line
             lines.extend(wrapped)
+            
         final_text = "\n".join(lines)
-        line_height_factor = 0.035 * fontsize
-        height = max(0.5, len(lines) * line_height_factor)
-        fig = Figure(figsize=(10.0, height), dpi=150, facecolor='#252525') 
+        
+        line_height_factor = 0.045 * fontsize 
+        height = max(0.5, len(lines) * line_height_factor) + 0.5
+        
+        # 2. Use a VERY wide figure (16 inches) to ensure nothing is ever cut off on the right.
+        # The 'tight' layout saving later will strip the unused space.
+        fig = Figure(figsize=(16.0, height), dpi=150, facecolor='#252525') 
         canvas = FigureCanvasAgg(fig)
+        
         fig.text(0.01, 0.98, final_text, fontsize=fontsize, color='white',
-                 horizontalalignment='left', verticalalignment='top')
+                 horizontalalignment='left', verticalalignment='top', wrap=True)
+                 
         canvas.draw()
         buf = BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, facecolor=fig.get_facecolor())
+        
+        # 3. bbox_inches='tight' calculates the exact bounding box of the text 
+        # and crops the image to fit. This removes the large empty gap on the right.
+        # pad_inches adds a small breathing room.
+        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.2, facecolor=fig.get_facecolor())
         buf.seek(0)
         return QPixmap.fromImage(QImage.fromData(buf.getvalue()))
-    except Exception: return None
+    except Exception as e: 
+        print(f"Render Error: {e}")
+        return None
 
 # --- SETTINGS DIALOG ---
 class SettingsDialog(QDialog):
@@ -562,7 +579,7 @@ class PhysicsApp(QMainWindow):
         self.current_idea_id = None
         self.autosave_interval = self.settings.get("autosave_interval", 0)
         self.latex_pixmap_original = None
-        self.tree_undo_stack = [] # Stack for Tree Structure Undo
+        self.tree_undo_stack = [] 
         
         self.render_timer = QTimer()
         self.render_timer.setSingleShot(True)
@@ -600,13 +617,22 @@ class PhysicsApp(QMainWindow):
         left_layout.setContentsMargins(5,5,5,5)
         
         left_label = QLabel("📚 Research Tree")
-        left_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        left_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
         left_layout.addWidget(left_label)
 
         self.tree_widget = ResearchTreeWidget(self.on_tree_dropped)
         self.tree_widget.setColumnCount(2)
         self.tree_widget.setHeaderLabels(["Topic", "Status"])
-        self.tree_widget.setColumnWidth(0, 160) # Narrower width
+        
+        # --- RESTORE COLUMN WIDTHS FROM SETTINGS ---
+        col0_w = self.settings.get("tree_col0_width", 160)
+        col1_w = self.settings.get("tree_col1_width", 100)
+        self.tree_widget.setColumnWidth(0, col0_w)
+        self.tree_widget.setColumnWidth(1, col1_w)
+        
+        # CONNECT SIGNALS TO SAVE WIDTHS IMMEDIATELY
+        self.tree_widget.header().sectionResized.connect(self.save_ui_layout_state)
+        
         self.tree_widget.itemClicked.connect(self.on_tree_select)
         left_layout.addWidget(self.tree_widget, 1)
         
@@ -632,7 +658,6 @@ class PhysicsApp(QMainWindow):
         self.btn_undo_tree.clicked.connect(self.undo_tree_action)
         self.btn_undo_tree.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
-        # Grid placement
         tree_btn_layout.addWidget(self.btn_root, 0, 0)
         tree_btn_layout.addWidget(self.btn_sub, 0, 1)
         tree_btn_layout.addWidget(self.btn_del, 1, 0)
@@ -661,14 +686,13 @@ class PhysicsApp(QMainWindow):
         # Header
         self.input_title = QLineEdit()
         self.input_title.setPlaceholderText("Topic Title")
-        self.input_title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        self.input_title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
         self.input_title.setStyleSheet("padding: 5px; border: 1px solid #444; border-radius: 4px; background: #333; color: white;")
         self.input_title.textChanged.connect(self.update_title_live)
         
         self.combo_status = QComboBox()
         self.combo_status.addItems(["Idea", "Deriving", "Drafting", "Published", "Abandoned"])
         self.combo_status.setStyleSheet("padding: 5px;")
-        # Trigger immediate color update on left panel
         self.combo_status.currentIndexChanged.connect(self.update_tree_status_live)
         
         header_layout = QHBoxLayout()
@@ -684,7 +708,8 @@ class PhysicsApp(QMainWindow):
         # --- TAB 1: NOTES ---
         self.tab_notes = QWidget()
         notes_layout = QVBoxLayout(self.tab_notes)
-        notes_splitter = QSplitter(Qt.Orientation.Vertical)
+        
+        self.notes_splitter = QSplitter(Qt.Orientation.Vertical)
         
         self.input_content = QTextEdit()
         self.input_content.setPlaceholderText("Notes & Derivations... (Use $...$ for LaTeX)")
@@ -729,9 +754,9 @@ class PhysicsApp(QMainWindow):
         preview_layout.addLayout(prev_ctrl_layout)
         preview_layout.addWidget(self.preview_scroll)
         
-        notes_splitter.addWidget(self.input_content)
-        notes_splitter.addWidget(preview_container)
-        notes_layout.addWidget(notes_splitter)
+        self.notes_splitter.addWidget(self.input_content)
+        self.notes_splitter.addWidget(preview_container)
+        notes_layout.addWidget(self.notes_splitter)
         
         # --- TAB 2: SCRATCH PAPER ---
         self.tab_scratch = QWidget()
@@ -881,7 +906,7 @@ class PhysicsApp(QMainWindow):
         self.wolf_main_splitter.addWidget(self.wolf_out_splitter)
         wolf_layout.addWidget(self.wolf_main_splitter)
 
-        # --- TAB 4: PHOTO NOTES (Updated) ---
+        # --- TAB 4: PHOTO NOTES ---
         self.tab_photos = QWidget()
         self.init_photo_tab()
 
@@ -918,7 +943,18 @@ class PhysicsApp(QMainWindow):
 
         self.main_splitter.addWidget(left_widget)
         self.main_splitter.addWidget(right_widget)
-        self.main_splitter.setStretchFactor(1, 2)
+        
+        # --- RESTORE SPLITTER STATE ---
+        if "main_splitter_state" in self.settings:
+            try:
+                self.main_splitter.restoreState(bytes.fromhex(self.settings["main_splitter_state"]))
+            except:
+                self.main_splitter.setStretchFactor(1, 2)
+        else:
+            self.main_splitter.setStretchFactor(1, 2)
+
+        # CONNECT SIGNAL TO SAVE SPLITTER STATE
+        self.main_splitter.splitterMoved.connect(self.save_ui_layout_state)
         
         main_layout.addWidget(self.main_splitter)
         
@@ -943,7 +979,7 @@ class PhysicsApp(QMainWindow):
         self.photo_list.setIconSize(QSize(200, 200))
         self.photo_list.setSpacing(15)
         self.photo_list.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.photo_list.setMovement(QListWidget.Movement.Static) # No dragging
+        self.photo_list.setMovement(QListWidget.Movement.Static) 
         self.photo_list.setStyleSheet("""
             QListWidget { background: #222; } 
             QListWidget::item { color: white; padding: 5px; } 
@@ -953,6 +989,17 @@ class PhysicsApp(QMainWindow):
         
         layout.addLayout(toolbar)
         layout.addWidget(self.photo_list)
+
+    # --- SAVE UI STATE (Columns & Splitter) ---
+    def save_ui_layout_state(self, *args):
+        # Save Tree Column Widths
+        self.settings["tree_col0_width"] = self.tree_widget.columnWidth(0)
+        self.settings["tree_col1_width"] = self.tree_widget.columnWidth(1)
+        # Save Main Splitter Position
+        self.settings["main_splitter_state"] = self.main_splitter.saveState().data().hex()
+        
+        # Commit to JSON immediately so it persists even if we don't save a topic
+        DataManager.save_data(self.data_wrapper, self.current_file)
 
     # --- UNDO SYSTEM ---
     def save_tree_state(self):
@@ -1041,13 +1088,12 @@ class PhysicsApp(QMainWindow):
             item.setText(1, text)
             item.setForeground(1, self.get_status_brush(text))
         
-        # Update data model immediately so saving works correctly even if we don't click save yet
         if self.current_idea_id:
             idea = self.get_idea_by_id(self.current_idea_id)
             if idea: idea['status'] = text
 
     def on_tree_dropped(self):
-        self.save_tree_state() # Undo point
+        self.save_tree_state() 
         new_data_list = []
         def traverse(item, parent_id):
             idea_id = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1207,7 +1253,6 @@ class PhysicsApp(QMainWindow):
         if not paths: return
         
         for path in paths:
-            # Copy to images dir to keep it self-contained
             ext = os.path.splitext(path)[1]
             unique_name = f"photo_{self.current_idea_id}_{uuid.uuid4().hex}{ext}"
             dest_path = os.path.join(IMG_DIR, unique_name)
@@ -1223,24 +1268,20 @@ class PhysicsApp(QMainWindow):
         item = QListWidgetItem()
         fname = os.path.basename(path)
         
-        # CHANGED: Truncate long filenames for display
         if len(fname) > 25:
              display_text = fname[:12] + "..." + fname[-8:]
              item.setText(display_text)
         else:
              item.setText(fname)
         
-        # Set full path/name as tooltip
         item.setToolTip(fname)
         item.setData(Qt.ItemDataRole.UserRole, path)
         
-        # Optimize: Create a scaled thumbnail for the UI so it doesn't lag
         pix = QPixmap(path)
         if pix.isNull():
             icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
             item.setIcon(icon)
         else:
-            # Scale down to 200x200 max for performance
             thumb = pix.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             item.setIcon(QIcon(thumb))
             
@@ -1251,9 +1292,6 @@ class PhysicsApp(QMainWindow):
         if not items: return
         if QMessageBox.question(self, "Delete", "Delete selected photos?") == QMessageBox.StandardButton.Yes:
             for item in items:
-                # Optionally delete file from disk? Keeping it safe for now by just removing reference.
-                # path = item.data(Qt.ItemDataRole.UserRole)
-                # if os.path.exists(path): os.remove(path)
                 self.photo_list.takeItem(self.photo_list.row(item))
             self.save_current_idea(manual=False)
 
@@ -1276,6 +1314,16 @@ class PhysicsApp(QMainWindow):
             self.autosave_interval = self.settings.get("autosave_interval", 0)
             if self.autosave_interval > 0: self.timer.start(self.autosave_interval)
             else: self.timer.stop()
+            
+            # --- RESTORE LAYOUT FOR NEW FILE ---
+            c0 = self.settings.get("tree_col0_width", 160)
+            c1 = self.settings.get("tree_col1_width", 100)
+            self.tree_widget.setColumnWidth(0, c0)
+            self.tree_widget.setColumnWidth(1, c1)
+            
+            if "main_splitter_state" in self.settings:
+                try: self.main_splitter.restoreState(bytes.fromhex(self.settings["main_splitter_state"]))
+                except: pass
 
             self.current_idea_id = None
             self.refresh_tree()
@@ -1347,8 +1395,12 @@ class PhysicsApp(QMainWindow):
             self.current_idea_id = None
             self.enable_right_panel(False)
             return
+        
         new_id = item.data(0, Qt.ItemDataRole.UserRole)
         self.current_idea_id = new_id
+        
+        self.tabs.setCurrentIndex(0)
+        
         self.load_idea_details(self.current_idea_id)
         self.enable_right_panel(True)
 
@@ -1392,7 +1444,7 @@ class PhysicsApp(QMainWindow):
             "wolfram_objects": [], 
             "scratch_objects": [], 
             "references": [],
-            "photos": [], # Photo Notes List
+            "photos": [], 
             "has_drawing": False,
             "date": datetime.now().strftime("%Y-%m-%d %H:%M")
         }
@@ -1420,10 +1472,22 @@ class PhysicsApp(QMainWindow):
         self.input_content.setText(idea.get('content', ''))
         self.input_content.blockSignals(False)
         
+        self.spin_font_size.blockSignals(True)
+        self.slider_latex_zoom.blockSignals(True)
+        
+        self.spin_font_size.setValue(idea.get('notes_font_size', 14))
+        self.slider_latex_zoom.setValue(idea.get('notes_zoom', 100))
+        
+        splitter_state_hex = idea.get('notes_splitter_state')
+        if splitter_state_hex:
+            self.notes_splitter.restoreState(bytes.fromhex(splitter_state_hex))
+            
+        self.spin_font_size.blockSignals(False)
+        self.slider_latex_zoom.blockSignals(False)
+        
         self.input_wolfram.setText(idea.get('wolfram_code', ''))
         self.output_wolfram.setText(idea.get('wolfram_output', ''))
         
-        # Wolfram Images
         for child in self.wolfram_canvas.findChildren(ImageContainer): child.deleteLater()
         saved_objs = idea.get('wolfram_objects', [])
         for obj in saved_objs:
@@ -1438,28 +1502,23 @@ class PhysicsApp(QMainWindow):
         
         self.slider_wolf_zoom.setValue(100)
         self.latex_pixmap_original = None
-        self.slider_latex_zoom.setValue(100)
         
-        # Status
         self.combo_status.blockSignals(True)
         idx = self.combo_status.findText(idea.get('status', 'Idea'))
         if idx >= 0: self.combo_status.setCurrentIndex(idx)
         self.combo_status.blockSignals(False)
         
-        # References
         self.ref_list.clear()
         for ref in idea.get('references', []):
             item = QListWidgetItem(f"[{ref['type'].upper()}] {ref['name']}")
             item.setData(Qt.ItemDataRole.UserRole, ref)
             self.ref_list.addItem(item)
             
-        # Photo Notes
         self.photo_list.clear()
         for p_path in idea.get('photos', []):
             if os.path.exists(p_path):
                 self._add_photo_widget(p_path)
 
-        # Scratchpad
         self.scribble_area.clear_canvas()
         bg_path = os.path.join(IMG_DIR, f"{iid}_bg.png")
         if os.path.exists(bg_path): self.scribble_area.set_background_image(bg_path)
@@ -1487,10 +1546,14 @@ class PhysicsApp(QMainWindow):
             idea['title'] = self.input_title.text().strip()
             idea['status'] = self.combo_status.currentText()
             idea['content'] = self.input_content.toPlainText()
+            
+            idea['notes_font_size'] = self.spin_font_size.value()
+            idea['notes_zoom'] = self.slider_latex_zoom.value()
+            idea['notes_splitter_state'] = self.notes_splitter.saveState().data().hex()
+            
             idea['wolfram_code'] = self.input_wolfram.toPlainText()
             idea['wolfram_output'] = self.output_wolfram.toPlainText()
             
-            # Wolfram Objs
             objs = []
             for child in self.wolfram_canvas.findChildren(ImageContainer):
                 rect = child.geometry()
@@ -1501,7 +1564,6 @@ class PhysicsApp(QMainWindow):
                 })
             idea['wolfram_objects'] = objs
             
-            # Scratchpad
             bg_path = os.path.join(IMG_DIR, f"{idea['id']}_bg.png")
             self.scribble_area.save_background(bg_path)
             s_objs = []
@@ -1524,7 +1586,6 @@ class PhysicsApp(QMainWindow):
             idea['scratch_objects'] = s_objs
             idea['has_drawing'] = True
             
-            # Photo Notes
             photo_paths = []
             for i in range(self.photo_list.count()):
                 item = self.photo_list.item(i)
@@ -1533,7 +1594,6 @@ class PhysicsApp(QMainWindow):
 
             DataManager.save_data(self.data_wrapper, self.current_file)
             
-            # Sync tree item text just in case (Color is handled by update_tree_status_live)
             iterator = QTreeWidgetItemIterator(self.tree_widget)
             while iterator.value():
                 item = iterator.value()
@@ -1573,8 +1633,11 @@ class PhysicsApp(QMainWindow):
 
     def _add_ref(self, t, p, n):
         d = self.get_idea_by_id(self.current_idea_id)
-        d['references'].append({"type": t, "path": p, "name": n})
-        self.ref_list.addItem(QListWidgetItem(f"[{t.upper()}] {n}"))
+        ref_data = {"type": t, "path": p, "name": n}
+        d['references'].append(ref_data)
+        item = QListWidgetItem(f"[{t.upper()}] {n}")
+        item.setData(Qt.ItemDataRole.UserRole, ref_data)
+        self.ref_list.addItem(item)
         DataManager.save_data(self.data_wrapper, self.current_file)
 
     def open_reference(self, item):
