@@ -487,15 +487,12 @@ def render_content_to_pixmap(text_content, fontsize=14):
         lines = []
         paragraphs = text_content.split('\n')
         
-        # 1. Increase wrap width significantly (from 90 to 110).
-        # This prevents LaTeX-heavy lines from wrapping too early.
         wrap_width = int(110 * (14.0 / fontsize))
         
         for paragraph in paragraphs:
             math_chunks = re.findall(math_pattern, paragraph)
             placeholder_text = paragraph
             for i, chunk in enumerate(math_chunks):
-                # Use a placeholder that is unique but not excessively long
                 placeholder_text = placeholder_text.replace(chunk, f"__M{i}__", 1)
             
             wrapped = textwrap.wrap(placeholder_text, width=wrap_width)
@@ -513,8 +510,6 @@ def render_content_to_pixmap(text_content, fontsize=14):
         line_height_factor = 0.045 * fontsize 
         height = max(0.5, len(lines) * line_height_factor) + 0.5
         
-        # 2. Use a VERY wide figure (16 inches) to ensure nothing is ever cut off on the right.
-        # The 'tight' layout saving later will strip the unused space.
         fig = Figure(figsize=(16.0, height), dpi=150, facecolor='#252525') 
         canvas = FigureCanvasAgg(fig)
         
@@ -524,9 +519,6 @@ def render_content_to_pixmap(text_content, fontsize=14):
         canvas.draw()
         buf = BytesIO()
         
-        # 3. bbox_inches='tight' calculates the exact bounding box of the text 
-        # and crops the image to fit. This removes the large empty gap on the right.
-        # pad_inches adds a small breathing room.
         fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.2, facecolor=fig.get_facecolor())
         buf.seek(0)
         return QPixmap.fromImage(QImage.fromData(buf.getvalue()))
@@ -630,7 +622,7 @@ class PhysicsApp(QMainWindow):
         self.tree_widget.setColumnWidth(0, col0_w)
         self.tree_widget.setColumnWidth(1, col1_w)
         
-        # CONNECT SIGNALS TO SAVE WIDTHS IMMEDIATELY
+        # CONNECT SIGNALS TO SAVE WIDTHS TO MEMORY (Not Disk)
         self.tree_widget.header().sectionResized.connect(self.save_ui_layout_state)
         
         self.tree_widget.itemClicked.connect(self.on_tree_select)
@@ -992,14 +984,24 @@ class PhysicsApp(QMainWindow):
 
     # --- SAVE UI STATE (Columns & Splitter) ---
     def save_ui_layout_state(self, *args):
-        # Save Tree Column Widths
+        # Save Tree Column Widths (To memory only, don't write disk here)
         self.settings["tree_col0_width"] = self.tree_widget.columnWidth(0)
         self.settings["tree_col1_width"] = self.tree_widget.columnWidth(1)
-        # Save Main Splitter Position
+        # Save Main Splitter Position (To memory only)
         self.settings["main_splitter_state"] = self.main_splitter.saveState().data().hex()
         
-        # Commit to JSON immediately so it persists even if we don't save a topic
-        DataManager.save_data(self.data_wrapper, self.current_file)
+        # REMOVED: DataManager.save_data(...) 
+        # This prevents the disk write loop while dragging.
+
+    # --- APP CLOSE EVENT (Save Layout Here) ---
+    def closeEvent(self, event):
+        # Save the layout state to disk when closing the app
+        self.save_ui_layout_state()
+        if self.current_idea_id:
+            self.save_current_idea(manual=False)
+        else:
+            DataManager.save_data(self.data_wrapper, self.current_file)
+        event.accept()
 
     # --- UNDO SYSTEM ---
     def save_tree_state(self):
