@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QInputDialog, QFileDialog, QTabWidget, QDialog, 
                              QRadioButton, QButtonGroup, QAbstractItemView, QSlider, QSpinBox,
                              QSizePolicy, QToolBar, QMenu, QFrame, QColorDialog, QCheckBox, QStyle,
-                             QGridLayout)
+                             QGridLayout, QDockWidget) # <--- Added QDockWidget
 from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QUrl, QRect
 from PyQt6.QtGui import (QPixmap, QImage, QFont, QPainter, QPen, QAction, 
                          QDesktopServices, QCursor, QColor, QIcon, QPalette, QBrush)
@@ -596,8 +596,8 @@ class PhysicsApp(QMainWindow):
         if self.autosave_interval > 0: self.timer.start(self.autosave_interval)
         self.timer.timeout.connect(self.auto_save)
         
-        self.create_menu()
         self.init_ui()
+        self.create_menu()
         self.setWindowTitle(f"Theoretical Physics Organizer - {os.path.basename(self.current_file)}")
 
     def create_menu(self):
@@ -609,6 +609,10 @@ class PhysicsApp(QMainWindow):
         save_as_action = QAction('Save Database As...', self)
         save_as_action.triggered.connect(self.save_database_as)
         file_menu.addAction(save_as_action)
+        
+        # --- NEW VIEW MENU FOR DOCK ---
+        view_menu = menubar.addMenu("View")
+        view_menu.addAction(self.ref_dock.toggleViewAction())
 
     def init_ui(self):
         central_widget = QWidget()
@@ -916,9 +920,14 @@ class PhysicsApp(QMainWindow):
         self.tab_photos = QWidget()
         self.init_photo_tab()
 
-        # --- TAB 5: REFERENCES ---
-        self.tab_refs = QWidget()
-        ref_layout = QVBoxLayout(self.tab_refs)
+        # --- NEW: REFERENCES DOCK (Moved out of Tabs) ---
+        self.ref_dock = QDockWidget("References", self)
+        self.ref_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+        
+        # Container for the dock contents
+        self.ref_container_widget = QWidget()
+        ref_layout = QVBoxLayout(self.ref_container_widget)
+        
         self.ref_list = QListWidget()
         self.ref_list.setStyleSheet("background: #252525; color: white;")
         self.ref_list.itemDoubleClicked.connect(self.open_reference)
@@ -933,17 +942,19 @@ class PhysicsApp(QMainWindow):
         ref_btns.addWidget(self.btn_add_url)
         ref_btns.addWidget(self.btn_add_file)
         ref_btns.addWidget(self.btn_del_ref)
-        ref_btns.addStretch()
         
-        ref_layout.addWidget(QLabel("<b>Research References (Double-click to open):</b>"))
+        ref_layout.addWidget(QLabel("<b>Research References:</b>"))
         ref_layout.addWidget(self.ref_list)
         ref_layout.addLayout(ref_btns)
+        
+        self.ref_dock.setWidget(self.ref_container_widget)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.ref_dock)
 
         self.tabs.addTab(self.tab_notes, "📝 Notes")
         self.tabs.addTab(self.tab_scratch, "✏️ Scratch Paper")
         self.tabs.addTab(self.tab_photos, "📷 Photo Notes")
         self.tabs.addTab(self.tab_wolfram, "🐺 Mathematica")
-        self.tabs.addTab(self.tab_refs, "🔗 References")
+        # References is no longer added here
 
         right_layout.addWidget(self.tabs)
 
@@ -1429,6 +1440,7 @@ class PhysicsApp(QMainWindow):
         self.input_title.setEnabled(enable)
         self.combo_status.setEnabled(enable)
         self.tabs.setEnabled(enable)
+        self.ref_dock.setEnabled(enable) # <--- Disable/Enable Dock content too
         if not enable:
             self.input_title.clear()
             self.input_content.clear()
